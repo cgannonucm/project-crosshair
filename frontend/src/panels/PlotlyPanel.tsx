@@ -33,7 +33,15 @@ export default function PlotlyPanel({ panel }: { panel: Panel }) {
         ...(spec.config ?? {}),
       };
 
-      await Plotly.react(node, spec.data ?? [], layout, config);
+      // Frames go through the object form of react() — the positional form has
+      // nowhere to put them, and without them Plotly's play/pause and slider
+      // controls are inert.
+      await Plotly.react(node, {
+        data: spec.data ?? [],
+        layout,
+        config,
+        frames: spec.frames ?? [],
+      } as any);
       plotNodes.set(panel.id, node);
 
       const plot = node as any;

@@ -1,0 +1,10 @@
+node_modules/
+dist/
+server/crosshair/static/
+examples/data/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.DS_Store

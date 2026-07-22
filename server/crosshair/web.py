@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import signal
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -12,6 +13,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import data as data_mod
+from . import persist
 from .ops import OPS
 from .state import STORE
 
@@ -19,8 +21,16 @@ STATIC_DIR = Path(__file__).parent / "static"
 SERVICE = "crosshair"
 
 
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    yield
+    # Uvicorn runs this on SIGTERM too, so an ordinary stop checkpoints rather
+    # than losing whatever is still inside the save debounce.
+    persist.flush()
+
+
 def create_app() -> FastAPI:
-    app = FastAPI(title="Crosshair")
+    app = FastAPI(title="Crosshair", lifespan=_lifespan)
 
     # ---- control plane (used by the MCP client) ----
 
@@ -78,6 +88,42 @@ def create_app() -> FastAPI:
         if arr is None:
             return JSONResponse({"error": "unknown ref"}, status_code=404)
         return JSONResponse({"values": arr})
+
+    @app.get("/api/history")
+    async def get_history(
+        view: str | None = None,
+        panel_id: str | None = None,
+        limit: int = 300,
+        include_args: bool = False,
+    ):
+        """The mutation log, for the browser's history explorer.
+
+        The same record `get_history` serves an agent — the browser reads it
+        over HTTP since it cannot make MCP calls.
+        """
+        entries = persist.read_history(
+            view=view,
+            panel_id=panel_id,
+            limit=max(1, min(int(limit), 1000)),
+            include_args=bool(include_args),
+        )
+        return {"history": entries, **persist.workspace_info()}
+
+    @app.post("/api/restore")
+    async def restore(payload: dict):
+        """Roll a panel back to a history version, driven from the browser's drawer."""
+        panel_id = payload.get("panel_id")
+        seq = payload.get("seq")
+        if not panel_id or seq is None:
+            return JSONResponse(
+                {"ok": False, "error": "panel_id and seq are required"}, status_code=400
+            )
+        try:
+            # Through OPS so the restore is journalled and the state is saved.
+            result = await OPS["restore_panel"](panel_id=str(panel_id), seq=int(seq))
+            return {"ok": True, "result": result}
+        except (ValueError, TypeError) as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
 
     @app.websocket("/ws")
     async def ws(websocket: WebSocket):

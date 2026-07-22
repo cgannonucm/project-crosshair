@@ -21,6 +21,8 @@ export interface Panel {
   spec: any;
   /** Bumped by the server whenever `spec` changes; drives re-plotting. */
   rev: number;
+  /** The code the agent said produced this plot, when it supplied any. */
+  code?: string | null;
 }
 
 /** A rectangle in data coordinates — comments track the data, not the pixels.
@@ -58,4 +60,20 @@ export interface WorkspaceState {
   views: View[];
   panels: Record<string, Panel>;
   comments: Comment[];
+}
+
+/** One entry in the on-disk mutation log, as served by GET /api/history. */
+export interface HistoryEntry {
+  seq: number;
+  ts: number;
+  op: string;
+  view: string | null;
+  panel_id: string | null;
+  rev: number | null;
+  /** The code the agent attached to the plot, when it supplied any. */
+  code: string | null;
+  /** True when this entry holds a panel snapshot that restore_panel can bring back. */
+  restorable?: boolean;
+  /** Full call arguments — present only when the fetch asked for them. */
+  args?: Record<string, any>;
 }

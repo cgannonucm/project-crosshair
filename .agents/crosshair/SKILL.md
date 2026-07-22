@@ -80,6 +80,35 @@ upsert_panel(
   plots. `type="image"` takes `spec={"src": "data:image/png;base64,..."}` or a
   URL.
 
+### Record how you built it
+
+Pass `code=` to `upsert_panel` with the analysis behind the figure — the snippet
+that loaded and transformed the data, not a restatement of the spec:
+
+```python
+upsert_panel(view="training", panel_id="loss", spec={...},
+             code="df = pd.read_parquet('runs.parquet')\n"
+                  "df['loss_a'] = df['loss_a'].rolling(50).mean()")
+```
+
+This is stored with the panel and journalled to disk, and it is the difference
+between a plot someone can reproduce and one they can only look at. Do it
+whenever you computed something to get the figure — a filter, a smoothing
+window, a join, a derived column. `patch_panel` also takes `code`; pass it only
+when the patch reflects a real change in the analysis, not a cosmetic tweak.
+
+`get_history(view=...)` or `get_history(panel_id=...)` reads the record back:
+every mutation with its timestamp, arguments, and code, oldest first. It
+survives `reset_workspace` and daemon restarts, so use it to pick up an earlier
+session — "what was this built from?" — rather than guessing from the spec.
+Specs are omitted unless you pass `include_args=True`.
+
+Panel edits are marked `restorable`, and `restore_panel(panel_id, seq)` rolls a
+panel back to that exact version (recreating its view if it was deleted). The
+restore is journalled too, so it can be undone. The human has the same control:
+the browser's **History** panel puts a **restore** button on every restorable
+version.
+
 ### Scrubbing through slices — don't drive a slider with `animate`
 
 `spec.frames` is passed through to Plotly, but **a slider whose steps use
@@ -184,11 +213,13 @@ browser is connected (`get_workspace()["browser_connected"]`).
 
 The daemon (default port 8137, stepping up to 8146 if taken) starts on the first
 tool call and keeps running after you go away — nothing needs starting by hand.
-State is in memory only.
+The workspace is checkpointed to `~/.crosshair/workspace`, so it also survives the
+daemon restarting.
 
 | Need | Tool |
 |---|---|
 | Is a display already up, with what on it? | `server_status` / `get_workspace` |
+| How did it get that way? | `get_history` |
 | Start it early or pin a port | `ensure_server(port=)` |
 | Clean slate, keep the tab | `reset_workspace` |
 | Tear it all down | `shutdown_server` |

@@ -82,6 +82,10 @@ async def main() -> None:
                     "yaxis": {"title": {"text": "loss"}},
                 },
             },
+            # `code` records how the figure was produced. It is stored with the
+            # panel and journalled to disk, so the plot stays reproducible.
+            code="df = pd.read_parquet('runs.parquet')\n"
+                 "px.line(df, x='step', y=['loss_a', 'loss_b'])",
         )
 
         await call(
@@ -135,6 +139,14 @@ async def main() -> None:
         print(f"workspace: {len(state['views'])} views, {len(state['panels'])} panels; "
               f"browser_connected={state['browser_connected']}")
         print(f"open {state['url']}")
+
+        # The daemon journals every mutation to disk — a reproducible record that
+        # outlives the workspace. Read it back for the training view.
+        hist = await call("get_history", view="training")
+        print(f"history: {hist['count']} recorded mutation(s) for 'training'")
+        for e in hist["history"]:
+            mark = " [code]" if e.get("code") else ""
+            print(f"  seq {e['seq']:>2}  {e['op']:<13} {e.get('panel_id') or ''}{mark}")
 
         # 6. Pin a comment to a region of the residual plot and wait for an answer.
         if state["browser_connected"]:

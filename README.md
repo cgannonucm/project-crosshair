@@ -22,7 +22,8 @@ and block waiting for a human to point at something.
 The display is a **detached daemon** (default port **8137**) that owns the
 workspace. The MCP process an agent harness spawns is a thin client over it, so
 plots and the human's open browser tab survive the agent session ending, an MCP
-restart, or several sessions sharing one display.
+restart, or several sessions sharing one display. The workspace is checkpointed to
+disk, so it survives the daemon itself restarting.
 
 The browser is a pure projection of daemon-held state — full state on connect and
 after every mutation, so reloads, reconnects, and multiple viewers are free.
@@ -62,8 +63,47 @@ If port 8137 is held by an **unrelated** process, the daemon steps to the next f
 port (up to 8146) and reports the real URL — it never dies from a port conflict. If
 the port is held by an existing *Crosshair* daemon, that one is reused instead.
 
-State lives in memory, so `shutdown_server` (or `stop`) discards the workspace. To
-clear the plots but keep the server and browser tab alive, use `reset_workspace`.
+The workspace is persisted to disk, so it comes back after a restart — a crash, a
+reboot, or `stop` followed by a later tool call. To clear the plots but keep the
+server and browser tab alive, use `reset_workspace`.
+
+## Persistence and history
+
+Everything is written under `~/.crosshair/workspace` (or `$CROSSHAIR_HOME`):
+
+```
+state.json           the current workspace, rewritten after every mutation
+history.jsonl        append-only record of every mutation, one JSON per line
+data/<ref_id>.json   materialized $ref arrays, so restored panels still render
+```
+
+`state.json` is what makes plots survive a restart. `history.jsonl` is what makes
+them **reproducible**: every view created, panel built or patched, and comment
+pinned is journalled with its timestamp and arguments. It outlives the workspace —
+entries survive `reset_workspace` and cover revisions the live spec has long since
+overwritten.
+
+Panel tools take an optional `code` argument, where an agent records the analysis
+that produced a figure:
+
+```python
+upsert_panel(view="training", panel_id="loss", spec={...},
+             code="df = pd.read_parquet('runs.parquet')\nfig = px.line(df, x='step', y='loss')")
+```
+
+The spec records what is on screen; `code` records how it was arrived at. Read
+both back with `get_history(view=...)` or `get_history(panel_id=...)`, which
+returns the record oldest-first and omits full specs unless you pass
+`include_args=True`.
+
+Panel edits (upsert, patch, and restores themselves) are marked `restorable` in
+the record — each keeps a snapshot of the resulting figure. `restore_panel(panel_id,
+seq)` rolls the panel back to that exact version; the restore is journalled in
+turn, so it can be undone. In the browser, the **History** panel lists every
+update and puts a **restore** button on each restorable version.
+
+Nothing prunes `history.jsonl` or `data/` — delete the workspace directory if it
+outgrows its usefulness.
 
 ## Tools
 
@@ -75,10 +115,12 @@ clear the plots but keep the server and browser tab alive, use `reset_workspace`
 | `open_ui` | Open the display in the human's browser |
 | `reset_workspace` | Clear all views and panels, keeping the server up |
 | `get_workspace` | Full current state — the agent's ground truth |
+| `get_history` | The on-disk record of how the display got here, with code |
+| `restore_panel` | Roll a panel back to a version recorded in the history |
 | `describe_data` | Row count, columns, dtypes, head of a data file |
 | `create_view` / `delete_view` | Manage views (browser tabs), each an R×C grid |
 | `set_layout` | Re-tile a view; supports row/column spans |
-| `upsert_panel` | Create or replace a panel (plotly / markdown / image) |
+| `upsert_panel` | Create or replace a panel (plotly / markdown / image), with optional `code` |
 | `patch_panel` | JSON-merge-patch a spec without resending the figure |
 | `append_data` | Extend a trace in place — live/streaming plots |
 | `remove_panel` | Remove a panel |

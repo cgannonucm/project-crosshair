@@ -359,6 +359,173 @@ button.ghost.active {
   cursor: pointer;
 }
 
+/* ---- history drawer ----
+   A right-hand slide-over that reads the on-disk mutation log. Floats above the
+   grid on its own scrim, which closes it on an outside click. */
+.drawer-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  background: rgba(0, 0, 0, 0.28);
+  display: flex;
+  justify-content: flex-end;
+}
+
+.history-drawer {
+  width: min(440px, 92vw);
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border-left: 1px solid var(--border);
+  box-shadow: -8px 0 28px rgba(0, 0, 0, 0.22);
+}
+
+.history-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.history-title { font-weight: 600; letter-spacing: 0.02em; }
+
+.history-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+/* Segmented scope switch: this view vs all views. */
+.seg { display: flex; border: 1px solid var(--border); border-radius: 5px; overflow: hidden; }
+.seg button {
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 12px;
+  padding: 3px 10px;
+  cursor: pointer;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.seg button + button { border-left: 1px solid var(--border); }
+.seg button:hover:not(:disabled) { background: var(--grid); color: var(--text-primary); }
+.seg button.active { background: var(--accent); color: #fff; }
+.seg button:disabled { opacity: 0.4; cursor: default; }
+
+.history-check {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  margin-left: auto;
+}
+.history-check input { cursor: pointer; }
+
+.history-notice {
+  margin: 8px 12px 0;
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--text-primary);
+  background: color-mix(in srgb, var(--good) 16%, transparent);
+  border: 1px solid color-mix(in srgb, var(--good) 45%, transparent);
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.history-list { flex: 1; min-height: 0; overflow: auto; padding: 8px 12px 16px; }
+.history-empty { color: var(--muted); font-size: 12px; padding: 12px 2px; }
+
+/* Always visible so the restore affordance is discoverable; brightens on hover. */
+.history-restore {
+  flex: none;
+  margin-left: 8px;
+  border: 1px solid var(--accent);
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  font-size: 11px;
+  padding: 1px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  opacity: 0.75;
+  transition: opacity 120ms ease, background 120ms ease, color 120ms ease;
+}
+.history-entry:hover .history-restore { opacity: 1; }
+.history-restore:hover:not(:disabled) { background: var(--accent); color: #fff; }
+.history-restore:disabled { cursor: default; color: var(--muted); border-color: var(--border); opacity: 1; }
+
+.history-entry {
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.history-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.op-badge {
+  flex: none;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  padding: 1px 7px;
+  border-radius: 999px;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  white-space: nowrap;
+}
+/* Destructive ops read in the warning color; comments in the human-green. */
+.op-badge.op-delete_view,
+.op-badge.op-remove_panel,
+.op-badge.op-delete_comment,
+.op-badge.op-reset_workspace {
+  color: var(--critical);
+  background: color-mix(in srgb, var(--critical) 14%, transparent);
+}
+.op-badge.op-add_comment,
+.op-badge.op-edit_comment,
+.op-badge.op-resolve_comment {
+  color: var(--good);
+  background: color-mix(in srgb, var(--good) 14%, transparent);
+}
+
+.history-target {
+  font-weight: 600;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.history-rev, .history-view { color: var(--muted); font-size: 11px; flex: none; }
+.history-time { margin-left: auto; color: var(--muted); font-size: 11px; flex: none; }
+
+.history-code, .history-args {
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  background: var(--plane);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text-primary);
+  overflow-x: auto;
+  white-space: pre;
+}
+.history-args { max-height: 320px; overflow: auto; color: var(--text-secondary); }
+.history-detail { margin-top: 6px; }
+
 .empty {
   height: 100%;
   display: flex;

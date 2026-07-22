@@ -18,6 +18,8 @@ from typing import Any
 
 import pandas as pd
 
+from . import persist
+
 # ref_id -> materialized list of values
 _ARRAYS: dict[str, list] = {}
 # (resolved path, mtime) -> DataFrame
@@ -116,6 +118,9 @@ def _resolve_one(ref: dict, base_dir: Path) -> str:
         json.dumps([str(path), column, ref.get("query"), stride], sort_keys=True).encode()
     ).hexdigest()[:16]
     _ARRAYS[ref_id] = values
+    # Keep a copy on disk so a panel restored after a restart still renders,
+    # even if the source file has since moved or changed.
+    persist.save_array(ref_id, values)
     return ref_id
 
 
@@ -131,7 +136,14 @@ def resolve_refs(spec: Any, base_dir: Path) -> Any:
 
 
 def get_array(ref_id: str) -> list | None:
-    return _ARRAYS.get(ref_id)
+    values = _ARRAYS.get(ref_id)
+    if values is None:
+        # A panel restored from disk references arrays this process never
+        # resolved; read them back rather than serving the browser a 404.
+        values = persist.load_array(ref_id)
+        if values is not None:
+            _ARRAYS[ref_id] = values
+    return values
 
 
 def describe_file(file: str, base_dir: Path) -> dict:

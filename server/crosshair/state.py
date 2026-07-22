@@ -44,6 +44,9 @@ class Panel:
     # object identity, so unrelated state broadcasts (a new comment, another
     # panel's edit) don't tear down a figure and lose its zoom or current frame.
     rev: int = 1
+    # The code the agent says produced this plot, if it supplied any. The spec
+    # records what is on screen; this records how it was arrived at.
+    code: str | None = None
 
 
 @dataclass
@@ -110,11 +113,79 @@ class Store:
             ],
             "panels": {
                 p.id: {"id": p.id, "view": p.view, "title": p.title, "type": p.type,
-                       "spec": p.spec, "rev": p.rev}
+                       "spec": p.spec, "rev": p.rev, "code": p.code}
                 for p in self.panels.values()
             },
             "comments": [self.comment_dict(c) for c in self.sorted_comments()],
         }
+
+    def load_from_dict(self, state: dict) -> None:
+        """Rebuild the workspace from a persisted `state_dict()` payload.
+
+        Tolerant by design: a workspace saved by an older build is worth
+        restoring partially, and a malformed entry should cost one panel rather
+        than the whole display.
+        """
+        self.views.clear()
+        self.panels.clear()
+        self.comments.clear()
+
+        for v in state.get("views") or []:
+            try:
+                self.views[v["name"]] = View(
+                    name=v["name"],
+                    rows=int(v.get("rows", 2)),
+                    cols=int(v.get("cols", 2)),
+                    placements=[
+                        Placement(
+                            panel_id=p["panel_id"],
+                            row=int(p.get("row", 1)),
+                            col=int(p.get("col", 1)),
+                            row_span=int(p.get("row_span", 1)),
+                            col_span=int(p.get("col_span", 1)),
+                        )
+                        for p in v.get("placements") or []
+                    ],
+                )
+            except (KeyError, TypeError, ValueError):
+                continue
+
+        for p in (state.get("panels") or {}).values():
+            try:
+                self.panels[p["id"]] = Panel(
+                    id=p["id"],
+                    view=p["view"],
+                    title=p.get("title") or p["id"],
+                    type=p.get("type") or "plotly",
+                    spec=p.get("spec") or {},
+                    rev=int(p.get("rev", 1)),
+                    code=p.get("code"),
+                )
+            except (KeyError, TypeError, ValueError):
+                continue
+
+        for c in state.get("comments") or []:
+            try:
+                a = c.get("anchor")
+                self.comments[c["id"]] = Comment(
+                    id=c["id"],
+                    panel_id=c["panel_id"],
+                    view=c["view"],
+                    author=c.get("author") or "agent",
+                    text=c.get("text") or "",
+                    ts=float(c.get("ts") or time.time()),
+                    anchor=Anchor(
+                        x0=a["x0"], x1=a["x1"], y0=a["y0"], y1=a["y1"],
+                        space=a.get("space") or "data",
+                    ) if a else None,
+                    resolved=bool(c.get("resolved")),
+                    edited_ts=c.get("edited_ts"),
+                )
+            except (KeyError, TypeError, ValueError):
+                continue
+
+        active = state.get("active_view")
+        self.active_view = active if active in self.views else next(iter(self.views), None)
 
     def comment_dict(self, c: Comment) -> dict:
         return {

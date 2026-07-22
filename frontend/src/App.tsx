@@ -3,6 +3,7 @@ import { toPng } from "html-to-image";
 import Plotly from "plotly.js-dist-min";
 import PanelFrame from "./panels/PanelFrame";
 import { plotNodes } from "./panels/PlotlyPanel";
+import HistoryDrawer from "./HistoryDrawer";
 import { onClientError, onSnapshotRequest, send, useWorkspace } from "./ws";
 import { useChrome } from "./theme";
 import type { Comment, View } from "./types";
@@ -12,6 +13,7 @@ export default function App() {
   const chrome = useChrome();
   const [selected, setSelected] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [showHistory, setShowHistory] = useState(false);
 
   // A rejected action must be visible — silently dropping one is how a comment
   // disappears with no explanation.
@@ -99,6 +101,13 @@ export default function App() {
             </button>
           ))}
         </nav>
+        <button
+          className={showHistory ? "ghost active" : "ghost"}
+          onClick={() => setShowHistory((v) => !v)}
+          title="Explore the history of every plot"
+        >
+          History
+        </button>
         <span className={connected ? "status ok" : "status down"}>
           {connected ? "connected" : "reconnecting…"}
         </span>
@@ -144,6 +153,10 @@ export default function App() {
           </div>
         )}
       </main>
+
+      {showHistory && (
+        <HistoryDrawer view={viewName} onClose={() => setShowHistory(false)} />
+      )}
 
       {error && (
         <div className="toast" role="alert" onClick={() => setError(null)}>

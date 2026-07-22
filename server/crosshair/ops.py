@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from . import data as data_mod
+from . import persist
 from .data import DataRefError
 from .state import STORE, Anchor, Comment, Panel, Placement, View
 
@@ -82,6 +83,19 @@ async def describe_data(file: str, base_dir: str | None = None) -> dict:
         return data_mod.describe_file(file, _base(base_dir))
     except DataRefError as exc:
         raise ValueError(str(exc)) from exc
+
+
+async def get_history(
+    view: str | None = None,
+    panel_id: str | None = None,
+    limit: int = 50,
+    include_args: bool = False,
+) -> dict:
+    limit = max(1, min(int(limit), 500))
+    entries = persist.read_history(
+        view=view, panel_id=panel_id, limit=limit, include_args=bool(include_args)
+    )
+    return {"history": entries, "count": len(entries), **persist.workspace_info()}
 
 
 # --------------------------------------------------------------------------
@@ -159,6 +173,7 @@ async def upsert_panel(
     row_span: int = 1,
     col_span: int = 1,
     base_dir: str | None = None,
+    code: str | None = None,
 ) -> dict:
     v = _require_view(view)
     if type not in PANEL_TYPES:
@@ -175,6 +190,9 @@ async def upsert_panel(
         type=type,
         spec=resolved,
         rev=(existing.rev + 1) if existing else 1,
+        # An upsert without code keeps whatever the panel already had, so a
+        # later positional tweak doesn't erase the provenance of the figure.
+        code=code if code is not None else (existing.code if existing else None),
     )
 
     has_placement = any(p.panel_id == panel_id for p in v.placements)
@@ -190,10 +208,13 @@ async def upsert_panel(
     return {"ok": True, "panel_id": panel_id, "view": view, "placement": placement.__dict__}
 
 
-async def patch_panel(panel_id: str, spec_patch: dict, base_dir: str | None = None) -> dict:
+async def patch_panel(panel_id: str, spec_patch: dict, base_dir: str | None = None,
+                      code: str | None = None) -> dict:
     panel = _require_panel(panel_id)
     panel.spec = _merge_patch(panel.spec, _resolve(spec_patch, base_dir))
     panel.rev += 1
+    if code is not None:
+        panel.code = code
     await STORE.broadcast_state()
     return {"ok": True, "panel_id": panel_id, "spec": panel.spec}
 
@@ -233,6 +254,56 @@ async def remove_panel(panel_id: str) -> dict:
     return {"ok": True, "removed": panel_id, "dropped_comments": dropped}
 
 
+async def restore_panel(panel_id: str, seq: int) -> dict:
+    """Roll a panel back to the version recorded at a history entry.
+
+    `seq` names an entry in the mutation log that carries a panel snapshot (an
+    upsert, a patch, or an earlier restore). The panel is recreated exactly as
+    it was then; the restore is itself journalled, so it can be undone in turn.
+    """
+    entry = persist.get_history_entry(int(seq))
+    if entry is None:
+        raise ValueError(f"No history entry with seq {seq}.")
+    if entry.get("panel_id") != panel_id:
+        raise ValueError(
+            f"History entry {seq} is for panel {entry.get('panel_id')!r}, not {panel_id!r}."
+        )
+    snap = entry.get("snapshot")
+    if not snap:
+        raise ValueError(
+            f"History entry {seq} ({entry.get('op')}) has no restorable snapshot — "
+            "only panel edits can be restored, not layout or comment changes."
+        )
+
+    view_name = snap.get("view")
+    v = STORE.views.get(view_name)
+    if v is None:
+        # The view was deleted since; bring it back so the panel has a home.
+        v = View(name=view_name, rows=1, cols=1)
+        STORE.views[view_name] = v
+        if STORE.active_view is None:
+            STORE.active_view = view_name
+
+    existing = STORE.panels.get(panel_id)
+    if existing is not None and existing.view != view_name:
+        STORE.remove_placement(panel_id)
+    STORE.panels[panel_id] = Panel(
+        id=panel_id,
+        view=view_name,
+        title=snap.get("title") or panel_id,
+        type=snap.get("type") or "plotly",
+        spec=snap.get("spec") or {},
+        rev=(existing.rev + 1) if existing else 1,
+        code=snap.get("code"),
+    )
+    if not any(p.panel_id == panel_id for p in v.placements):
+        r, c = STORE.next_free_cell(v)
+        v.placements.append(Placement(panel_id, r, c))
+
+    await STORE.broadcast_state()
+    return {"ok": True, "panel_id": panel_id, "restored_from_seq": int(seq), "view": view_name}
+
+
 async def reset_workspace() -> dict:
     """Clear every view, panel, and comment without restarting the daemon."""
     views, panels, comments = len(STORE.views), len(STORE.panels), len(STORE.comments)
@@ -240,6 +311,9 @@ async def reset_workspace() -> dict:
     STORE.panels.clear()
     STORE.comments.clear()
     STORE.active_view = None
+    # The plots go, but the history log does not — it is the record of what was
+    # here, and clearing the screen is not a reason to forget it.
+    persist.clear()
     await STORE.broadcast_state()
     return {"ok": True, "cleared_views": views, "cleared_panels": panels,
             "cleared_comments": comments}
@@ -401,24 +475,96 @@ async def delete_comment(comment_id: str) -> dict:
     return {"ok": True, "deleted": comment_id}
 
 
-# Dispatch table used by the daemon's /rpc endpoint.
-OPS = {
-    "get_workspace": get_workspace,
-    "describe_data": describe_data,
-    "create_view": create_view,
-    "delete_view": delete_view,
-    "set_layout": set_layout,
-    "upsert_panel": upsert_panel,
-    "patch_panel": patch_panel,
-    "append_data": append_data,
-    "remove_panel": remove_panel,
-    "reset_workspace": reset_workspace,
-    "snapshot": snapshot,
-    "get_events": get_events,
-    "wait_for_feedback": wait_for_feedback,
-    "add_comment": add_comment,
-    "list_comments": list_comments,
-    "resolve_comment": resolve_comment,
-    "edit_comment": edit_comment,
-    "delete_comment": delete_comment,
+# --------------------------------------------------------------------------
+# Dispatch table — every mutation is journalled on its way through
+# --------------------------------------------------------------------------
+
+# Ops that change the workspace. Wrapping here rather than decorating each
+# function catches both callers: the /rpc endpoint and the browser-driven
+# comment mutations in web.py, which dispatch through this same table.
+MUTATING_OPS = {
+    "create_view", "delete_view", "set_layout", "upsert_panel", "patch_panel",
+    "append_data", "remove_panel", "reset_workspace", "add_comment",
+    "resolve_comment", "edit_comment", "delete_comment", "restore_panel",
 }
+
+# Ops that define a distinct, restorable version of a plot. Each records a
+# snapshot of the resulting panel; streaming appends and layout moves do not,
+# so the timeline offers restore points at meaningful edits rather than at every
+# frame of a live curve.
+SNAPSHOT_OPS = {"upsert_panel", "patch_panel", "restore_panel"}
+
+
+def _entry_view(op: str, args: dict, panel_id: str | None) -> str | None:
+    """Which tab a mutation belongs to — the history is read per-tab."""
+    if args.get("view"):
+        return args["view"]
+    if op in ("create_view", "delete_view") and args.get("name"):
+        return args["name"]
+    if panel_id:
+        panel = STORE.panels.get(panel_id)
+        if panel is not None:
+            return panel.view
+    return None
+
+
+def _journalled(op: str, fn):
+    async def run(**args):
+        result = await fn(**args)
+        panel_id = args.get("panel_id")
+        panel = STORE.panels.get(panel_id) if panel_id else None
+        snapshot = None
+        if op in SNAPSHOT_OPS and panel is not None:
+            # The resolved panel as it stands after the op — enough to recreate
+            # it verbatim. $data ids inside point at arrays already persisted.
+            snapshot = {
+                "view": panel.view,
+                "title": panel.title,
+                "type": panel.type,
+                "spec": panel.spec,
+                "code": panel.code,
+            }
+        persist.record(
+            op,
+            args,
+            view=_entry_view(op, args, panel_id),
+            panel_id=panel_id,
+            rev=panel.rev if panel else None,
+            code=args.get("code"),
+            snapshot=snapshot,
+        )
+        persist.schedule_save()
+        return result
+
+    return run
+
+
+def _build_ops() -> dict:
+    ops = {
+        "get_workspace": get_workspace,
+        "describe_data": describe_data,
+        "get_history": get_history,
+        "create_view": create_view,
+        "delete_view": delete_view,
+        "set_layout": set_layout,
+        "upsert_panel": upsert_panel,
+        "patch_panel": patch_panel,
+        "append_data": append_data,
+        "remove_panel": remove_panel,
+        "restore_panel": restore_panel,
+        "reset_workspace": reset_workspace,
+        "snapshot": snapshot,
+        "get_events": get_events,
+        "wait_for_feedback": wait_for_feedback,
+        "add_comment": add_comment,
+        "list_comments": list_comments,
+        "resolve_comment": resolve_comment,
+        "edit_comment": edit_comment,
+        "delete_comment": delete_comment,
+    }
+    return {name: _journalled(name, fn) if name in MUTATING_OPS else fn
+            for name, fn in ops.items()}
+
+
+# Dispatch table used by the daemon's /rpc endpoint.
+OPS = _build_ops()

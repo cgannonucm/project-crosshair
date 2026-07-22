@@ -64,6 +64,7 @@ def read_record() -> dict | None:
 
 
 async def serve(host: str = "127.0.0.1", port: int = DEFAULT_PORT) -> None:
+    from . import persist
     from .state import STORE
     from .web import create_app
 
@@ -71,6 +72,18 @@ async def serve(host: str = "127.0.0.1", port: int = DEFAULT_PORT) -> None:
     display_host = "localhost" if host in ("0.0.0.0", "127.0.0.1") else host
     url = f"http://{display_host}:{bound}"
     STORE.url = url
+
+    # Bring back whatever the last daemon had on screen. The browser gets full
+    # state on connect, so a restored workspace needs nothing further.
+    saved = persist.load_state()
+    if saved:
+        STORE.load_from_dict(saved)
+        print(
+            f"Restored {len(STORE.views)} view(s) and {len(STORE.panels)} panel(s) "
+            f"from {persist.STATE_FILE}",
+            file=sys.stderr,
+            flush=True,
+        )
 
     config = uvicorn.Config(create_app(), host=host, port=bound, log_level="warning", access_log=False)
     server = uvicorn.Server(config)

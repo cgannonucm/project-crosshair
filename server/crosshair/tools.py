@@ -133,6 +133,54 @@ async def get_workspace() -> dict:
 
 
 @mcp.tool
+async def get_history(
+    view: str | None = None,
+    panel_id: str | None = None,
+    limit: int = 50,
+    include_args: bool = False,
+) -> dict:
+    """Read the on-disk record of how the display got to its current state.
+
+    Every mutation — each view created, panel built or patched, comment pinned —
+    is journalled to disk with its timestamp, its arguments, and any `code` the
+    agent attached. This outlives the workspace itself: entries survive
+    reset_workspace and daemon restarts, and cover revisions the live spec has
+    long since overwritten.
+
+    Filter by `view` for one tab's history, or by `panel_id` for one plot's.
+    Returns the most recent `limit` entries, oldest first. Full figure specs are
+    omitted unless you pass `include_args=True` — they are large, and usually
+    the op, timestamp, and code are what you want.
+
+    Use this to pick up an earlier session ("what was this plot built from?"),
+    to reproduce a figure, or to show the human the provenance of what they are
+    looking at.
+
+    Each entry has a `restorable` flag: true for the panel edits (upsert, patch,
+    or an earlier restore) whose exact figure can be brought back with
+    restore_panel, false for layout, comment, and streaming entries.
+    """
+    return await client.call(
+        "get_history", view=view, panel_id=panel_id, limit=limit, include_args=include_args
+    )
+
+
+@mcp.tool
+async def restore_panel(panel_id: str, seq: int) -> dict:
+    """Roll a panel back to the version recorded at a history entry.
+
+    `seq` is the `seq` of a `restorable` entry from get_history for this panel —
+    an upsert, a patch, or an earlier restore. The panel is recreated exactly as
+    it was at that point (its view is recreated too, if it has since been
+    deleted). The restore is itself journalled, so it can be undone in turn.
+
+    Find a target with get_history(panel_id=...), then restore_panel(panel_id,
+    seq). The human can do the same from the History drawer's restore button.
+    """
+    return await client.call("restore_panel", panel_id=panel_id, seq=seq)
+
+
+@mcp.tool
 async def describe_data(file: str) -> dict:
     """Inspect a data file before plotting it: row count, column names, dtypes, first 5 rows.
 
@@ -199,6 +247,7 @@ async def upsert_panel(
     col: int | None = None,
     row_span: int = 1,
     col_span: int = 1,
+    code: str | None = None,
 ) -> dict:
     """Create or replace a panel. This is the main tool for putting a plot on screen.
 
@@ -235,17 +284,23 @@ async def upsert_panel(
     If `row`/`col` are omitted the panel keeps its existing position, or takes
     the next free cell if it is new. Use "scattergl" rather than "scatter" for
     more than a few thousand points — it renders on the GPU.
+
+    Pass `code` with the analysis that produced this figure — the snippet that
+    computed the data or built the spec. It is stored with the panel and written
+    to the on-disk history, which is what makes a plot reproducible later; the
+    spec alone records what is on screen, not how you got there. Read it back
+    with get_history.
     """
     return await client.call(
         "upsert_panel",
         view=view, panel_id=panel_id, spec=spec, title=title, type=type,
         row=row, col=col, row_span=row_span, col_span=col_span,
-        base_dir=_base_dir(),
+        base_dir=_base_dir(), code=code,
     )
 
 
 @mcp.tool
-async def patch_panel(panel_id: str, spec_patch: dict) -> dict:
+async def patch_panel(panel_id: str, spec_patch: dict, code: str | None = None) -> dict:
     """Apply a JSON merge patch to a panel's spec without resending the whole figure.
 
     Keys in `spec_patch` overwrite matching keys; nested objects merge; a null
@@ -256,9 +311,13 @@ async def patch_panel(panel_id: str, spec_patch: dict) -> dict:
     rather than merging into it; use upsert_panel to change traces.
 
     Example: patch_panel("loss", {"layout": {"yaxis": {"type": "log"}}})
+
+    `code` optionally updates the panel's recorded provenance — pass it when the
+    patch reflects a change in the analysis behind the figure, not for cosmetic
+    tweaks. Omitting it leaves the existing code untouched.
     """
     return await client.call("patch_panel", panel_id=panel_id, spec_patch=spec_patch,
-                             base_dir=_base_dir())
+                             base_dir=_base_dir(), code=code)
 
 
 @mcp.tool

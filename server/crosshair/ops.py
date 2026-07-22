@@ -10,12 +10,14 @@ from __future__ import annotations
 
 import base64
 import os
+import time
+import uuid
 from pathlib import Path
 from typing import Any
 
 from . import data as data_mod
 from .data import DataRefError
-from .state import STORE, Panel, Placement, View
+from .state import STORE, Anchor, Comment, Panel, Placement, View
 
 PANEL_TYPES = ("plotly", "markdown", "image")
 
@@ -106,6 +108,7 @@ async def delete_view(name: str) -> dict:
     _require_view(name)
     for panel_id in [p.id for p in STORE.panels.values() if p.view == name]:
         del STORE.panels[panel_id]
+    STORE.drop_comments(view=name)
     del STORE.views[name]
     if STORE.active_view == name:
         STORE.active_view = next(iter(STORE.views), None)
@@ -171,6 +174,7 @@ async def upsert_panel(
         title=title or (existing.title if existing else panel_id),
         type=type,
         spec=resolved,
+        rev=(existing.rev + 1) if existing else 1,
     )
 
     has_placement = any(p.panel_id == panel_id for p in v.placements)
@@ -189,6 +193,7 @@ async def upsert_panel(
 async def patch_panel(panel_id: str, spec_patch: dict, base_dir: str | None = None) -> dict:
     panel = _require_panel(panel_id)
     panel.spec = _merge_patch(panel.spec, _resolve(spec_patch, base_dir))
+    panel.rev += 1
     await STORE.broadcast_state()
     return {"ok": True, "panel_id": panel_id, "spec": panel.spec}
 
@@ -223,18 +228,21 @@ async def remove_panel(panel_id: str) -> dict:
     _require_panel(panel_id)
     del STORE.panels[panel_id]
     STORE.remove_placement(panel_id)
+    dropped = STORE.drop_comments(panel_id=panel_id)
     await STORE.broadcast_state()
-    return {"ok": True, "removed": panel_id}
+    return {"ok": True, "removed": panel_id, "dropped_comments": dropped}
 
 
 async def reset_workspace() -> dict:
-    """Clear every view and panel without restarting the daemon."""
-    views, panels = len(STORE.views), len(STORE.panels)
+    """Clear every view, panel, and comment without restarting the daemon."""
+    views, panels, comments = len(STORE.views), len(STORE.panels), len(STORE.comments)
     STORE.views.clear()
     STORE.panels.clear()
+    STORE.comments.clear()
     STORE.active_view = None
     await STORE.broadcast_state()
-    return {"ok": True, "cleared_views": views, "cleared_panels": panels}
+    return {"ok": True, "cleared_views": views, "cleared_panels": panels,
+            "cleared_comments": comments}
 
 
 # --------------------------------------------------------------------------
@@ -266,9 +274,131 @@ async def wait_for_feedback(timeout_s: float = 300.0, since_seq: int = 0) -> dic
     return {"events": events, "latest_seq": STORE.event_seq, "timed_out": not events}
 
 
-async def add_note(text: str, view: str | None = None) -> dict:
-    await STORE.broadcast({"type": "agent_note", "text": text, "view": view or STORE.active_view})
-    return {"ok": True}
+# --------------------------------------------------------------------------
+# Comments — margin notes anchored to a region of a panel
+# --------------------------------------------------------------------------
+
+
+def _require_comment(comment_id: str) -> Comment:
+    comment = STORE.comments.get(comment_id)
+    if comment is None:
+        known = ", ".join(STORE.comments) or "(none yet)"
+        raise ValueError(f"No comment {comment_id!r}. Existing comments: {known}")
+    return comment
+
+
+def _ordered(a: Any, b: Any) -> tuple[Any, Any]:
+    """Low, high — but only numbers can be ordered; dates and categories pass through."""
+    if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+        return (a, b) if a <= b else (b, a)
+    return a, b
+
+
+def _anchor(x0: Any, x1: Any, y0: Any, y1: Any, space: str = "data") -> Anchor | None:
+    """Build an anchor, or None for a whole-panel comment."""
+    coords = (x0, x1, y0, y1)
+    if all(c is None for c in coords):
+        return None
+    if any(c is None for c in coords):
+        raise ValueError(
+            "An anchored comment needs all four of x0, x1, y0, y1. "
+            "Omit all four to comment on the panel as a whole."
+        )
+    if space not in ("data", "panel"):
+        raise ValueError(
+            f"space must be 'data' (coordinates on the axes) or 'panel' "
+            f"(fractions of the panel box), got {space!r}"
+        )
+    if space == "panel":
+        for name, c in zip(("x0", "x1", "y0", "y1"), coords):
+            if not isinstance(c, (int, float)) or isinstance(c, bool):
+                raise ValueError(
+                    f"A panel-space anchor needs numeric fractions; {name}={c!r}."
+                )
+            if not 0.0 <= c <= 1.0:
+                raise ValueError(
+                    f"A panel-space anchor is measured in fractions of the panel, "
+                    f"so every coordinate must be between 0 and 1; {name}={c!r}."
+                )
+    lo_x, hi_x = _ordered(x0, x1)
+    lo_y, hi_y = _ordered(y0, y1)
+    return Anchor(x0=lo_x, x1=hi_x, y0=lo_y, y1=hi_y, space=space)
+
+
+async def add_comment(
+    panel_id: str,
+    text: str,
+    x0: Any = None,
+    x1: Any = None,
+    y0: Any = None,
+    y1: Any = None,
+    space: str = "data",
+    author: str = "agent",
+) -> dict:
+    panel = _require_panel(panel_id)
+    text = (text or "").strip()
+    if not text:
+        raise ValueError("A comment needs non-empty text.")
+    if author not in ("agent", "human"):
+        raise ValueError(f"author must be 'agent' or 'human', got {author!r}")
+    anchor = _anchor(x0, x1, y0, y1, space)
+    if anchor is not None and anchor.space == "data" and panel.type != "plotly":
+        raise ValueError(
+            f"Only plotly panels have data coordinates to anchor to; {panel_id!r} is {panel.type!r}. "
+            "Pass space='panel' to anchor to a fraction of the panel box instead, "
+            "or omit x0/x1/y0/y1 to comment on the panel as a whole."
+        )
+    comment = Comment(
+        id=uuid.uuid4().hex[:12],
+        panel_id=panel_id,
+        view=panel.view,
+        author=author,
+        text=text,
+        ts=time.time(),
+        anchor=anchor,
+    )
+    STORE.comments[comment.id] = comment
+    await STORE.broadcast_comments()
+    return {"ok": True, "comment": STORE.comment_dict(comment)}
+
+
+async def list_comments(panel_id: str | None = None, view: str | None = None,
+                        include_resolved: bool = False) -> dict:
+    comments = STORE.sorted_comments()
+    if panel_id is not None:
+        comments = [c for c in comments if c.panel_id == panel_id]
+    if view is not None:
+        comments = [c for c in comments if c.view == view]
+    if not include_resolved:
+        comments = [c for c in comments if not c.resolved]
+    return {"comments": [STORE.comment_dict(c) for c in comments]}
+
+
+async def resolve_comment(comment_id: str, resolved: bool = True) -> dict:
+    comment = _require_comment(comment_id)
+    comment.resolved = bool(resolved)
+    await STORE.broadcast_comments()
+    return {"ok": True, "comment": STORE.comment_dict(comment)}
+
+
+async def edit_comment(comment_id: str, text: str) -> dict:
+    """Rewrite a comment's text in place, keeping its id, anchor, and place in the order."""
+    comment = _require_comment(comment_id)
+    text = (text or "").strip()
+    if not text:
+        raise ValueError("A comment needs non-empty text.")
+    # `ts` is the posting time and drives pin numbering, so an edit leaves it be.
+    comment.text = text
+    comment.edited_ts = time.time()
+    await STORE.broadcast_comments()
+    return {"ok": True, "comment": STORE.comment_dict(comment)}
+
+
+async def delete_comment(comment_id: str) -> dict:
+    _require_comment(comment_id)
+    del STORE.comments[comment_id]
+    await STORE.broadcast_comments()
+    return {"ok": True, "deleted": comment_id}
 
 
 # Dispatch table used by the daemon's /rpc endpoint.
@@ -286,5 +416,9 @@ OPS = {
     "snapshot": snapshot,
     "get_events": get_events,
     "wait_for_feedback": wait_for_feedback,
-    "add_note": add_note,
+    "add_comment": add_comment,
+    "list_comments": list_comments,
+    "resolve_comment": resolve_comment,
+    "edit_comment": edit_comment,
+    "delete_comment": delete_comment,
 }

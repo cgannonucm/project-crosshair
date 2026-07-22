@@ -86,7 +86,7 @@ def create_app() -> FastAPI:
         try:
             await websocket.send_json({"type": "state", "state": STORE.state_dict()})
             while True:
-                await _handle_client_message(await websocket.receive_json())
+                await _handle_client_message(await websocket.receive_json(), websocket)
         except WebSocketDisconnect:
             pass
         except Exception:
@@ -100,7 +100,14 @@ def create_app() -> FastAPI:
     return app
 
 
-async def _handle_client_message(msg: dict) -> None:
+async def _error_to(websocket, text: str) -> None:
+    try:
+        await websocket.send_json({"type": "client_error", "text": text})
+    except Exception:
+        pass
+
+
+async def _handle_client_message(msg: dict, websocket=None) -> None:
     kind = msg.get("type")
     if kind == "snapshot_result":
         STORE.resolve_snapshot(msg.get("request_id", ""), msg.get("png"), msg.get("error"))
@@ -115,3 +122,57 @@ async def _handle_client_message(msg: dict) -> None:
         name = msg.get("view")
         if name in STORE.views:
             STORE.active_view = name
+    elif kind in _COMMENT_OPS:
+        await _handle_comment_message(kind, msg, websocket)
+    elif websocket is not None:
+        # Never drop a message silently: a browser newer than this daemon must
+        # find out, rather than watching its comment vanish into nothing.
+        await _error_to(
+            websocket,
+            f"This server does not understand {kind!r}. It is probably older than the "
+            "page you have open — restart the Crosshair daemon.",
+        )
+
+
+# Comment mutations the browser is allowed to drive, mapped to their op and to
+# the event kind the agent sees for them.
+_COMMENT_OPS = {
+    "add_comment": ("add_comment", "comment"),
+    "resolve_comment": ("resolve_comment", "comment_resolved"),
+    "edit_comment": ("edit_comment", "comment_edited"),
+    "delete_comment": ("delete_comment", "comment_resolved"),
+}
+
+
+async def _handle_comment_message(kind: str, msg: dict, websocket=None) -> None:
+    """Apply a comment mutation from the browser, then queue it as agent-visible feedback.
+
+    Human comments are the main thing an agent waits on, so each one lands in the
+    event queue as well as in workspace state.
+    """
+    op_name, event_kind = _COMMENT_OPS[kind]
+    op = OPS[op_name]
+    args = dict(msg.get("args") or {})
+    if kind == "add_comment":
+        args["author"] = "human"
+    try:
+        result = await op(**args)
+    except (ValueError, TypeError) as exc:
+        if websocket is not None:
+            await _error_to(websocket, str(exc))
+        return
+
+    comment = result.get("comment")
+    if comment is None:
+        return  # a retracted comment is not feedback
+    await STORE.add_event(
+        kind=event_kind,
+        data={
+            "comment_id": comment["id"],
+            "text": comment["text"],
+            "anchor": comment["anchor"],
+            "resolved": comment["resolved"],
+        },
+        panel_id=comment["panel_id"],
+        view=comment["view"],
+    )

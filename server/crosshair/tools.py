@@ -320,7 +320,11 @@ async def get_events(since_seq: int = 0, limit: int = 100) -> dict:
       - "selection": the human box/lasso-selected points. data has `indices`
         (point indices within the trace), `points` (their x/y values), `trace`.
       - "zoom": the human zoomed or panned. data has the visible axis ranges.
-      - "comment": free text the human wrote on a panel or the workspace.
+      - "comment": the human pinned a comment. data has `comment_id`, `text`, and
+        `anchor` (the region it is pinned to, or null for a whole-panel comment;
+        `anchor.space` is "data" for axis coordinates, "panel" for fractions of
+        the panel box — the latter means they marked up the chrome, not the data).
+      - "comment_resolved": the human resolved or reopened a comment.
       - "click": the human clicked a single point.
 
     Returns {"events": [...], "latest_seq": N}.
@@ -332,23 +336,109 @@ async def get_events(since_seq: int = 0, limit: int = 100) -> dict:
 async def wait_for_feedback(timeout_s: float = 300.0, since_seq: int = 0) -> dict:
     """Block until the human interacts with the display, or until `timeout_s` elapses.
 
-    Use this when you want a human in the loop: render a plot, tell them what to
-    look at with add_note, then call this to wait for their selection or comment.
-    Returns the same shape as get_events, with `timed_out` set if nothing arrived.
+    Use this when you want a human in the loop: render a plot, pin a comment on
+    the part you want them to look at with add_comment, then call this to wait
+    for their answer. Returns the same shape as get_events, with `timed_out` set
+    if nothing arrived.
 
-    Example flow: upsert_panel(...) -> add_note("I've plotted the residuals;
-    please lasso the outliers") -> wait_for_feedback() -> read the indices.
+    Example flow: upsert_panel(...) -> add_comment("resid", "These four points
+    sit well off the trend — are they the sensor dropouts?", x0=200, x1=260,
+    y0=0.4, y1=0.9) -> wait_for_feedback() -> read their reply comment.
     """
     return await client.call(
         "wait_for_feedback", since_seq=since_seq, timeout_s=timeout_s, timeout=timeout_s + 15.0
     )
 
 
-@mcp.tool
-async def add_note(text: str, view: str | None = None) -> dict:
-    """Post a note into the browser's activity log — tell the human what to look at.
+# --------------------------------------------------------------------------
+# Comments — margin notes pinned to a region of a plot
+# --------------------------------------------------------------------------
 
-    This is how you narrate: explain what you plotted and what you want them to
-    check, then call wait_for_feedback.
+
+@mcp.tool
+async def add_comment(
+    panel_id: str,
+    text: str,
+    x0: float | str | None = None,
+    x1: float | str | None = None,
+    y0: float | str | None = None,
+    y1: float | str | None = None,
+    space: str = "data",
+) -> dict:
+    """Pin a comment to a region of a plot — the way you point at something.
+
+    The comment shows as a numbered pin on the panel; the human clicks it to read
+    the text, exactly like a margin comment in a word processor. Use this to
+    narrate ("this shoulder is the LR warmup ending") or to ask a question about
+    a specific place in the data, then call wait_for_feedback.
+
+    `x0`/`x1`/`y0`/`y1` bound the region. With the default `space="data"` they are
+    **data coordinates**, not pixels — read them off the axes of the figure you
+    built, and the pin stays on that data as the human zooms and pans.
+
+    Example — flag a loss spike between steps 200 and 260:
+
+        add_comment("loss", "Loss spikes here — is this the LR restart?",
+                    x0=200, x1=260, y0=0.4, y1=0.9)
+
+    Pass `space="panel"` to bound the region in fractions of the panel box
+    instead (0-1, x rightward and y downward from the top-left corner). Use that
+    for the chrome rather than the data — a tick label, an axis title, a legend —
+    where there are no data coordinates and the pin should not move when the
+    human zooms. It works on markdown and image panels too.
+
+        add_comment("loss", "These tick labels want SI units",
+                    x0=0.0, x1=0.09, y0=0.1, y1=0.9, space="panel")
+
+    Omit all four coordinates to comment on the panel as a whole.
     """
-    return await client.call("add_note", text=text, view=view)
+    return await client.call(
+        "add_comment", panel_id=panel_id, text=text,
+        x0=x0, x1=x1, y0=y0, y1=y1, space=space, author="agent",
+    )
+
+
+@mcp.tool
+async def list_comments(
+    panel_id: str | None = None, view: str | None = None, include_resolved: bool = False
+) -> dict:
+    """Read the comments on the display — yours and the human's — oldest first.
+
+    Each comment has an `id`, `author` ("agent" or "human"), `text`, and `anchor`
+    (the region it is pinned to, or null for a whole-panel comment). An anchor
+    carries a `space`: "data" for axis coordinates, "panel" for fractions of the
+    panel box. Filter by `panel_id` or `view`; resolved comments are hidden unless
+    you ask for them.
+
+    Use this to pick up a thread from an earlier session, or after
+    wait_for_feedback to see what the human pinned and where.
+    """
+    return await client.call(
+        "list_comments", panel_id=panel_id, view=view, include_resolved=include_resolved
+    )
+
+
+@mcp.tool
+async def resolve_comment(comment_id: str, resolved: bool = True) -> dict:
+    """Mark a comment as resolved, hiding its pin from the plot.
+
+    Do this once you have acted on the human's comment, so the display shows only
+    what is still open. Pass `resolved=False` to reopen one.
+    """
+    return await client.call("resolve_comment", comment_id=comment_id, resolved=resolved)
+
+
+@mcp.tool
+async def edit_comment(comment_id: str, text: str) -> dict:
+    """Rewrite a comment's text, keeping its pin, anchor, and number.
+
+    Use this to revise a note you already posted — annotating a plot with a
+    conclusion you have since sharpened — rather than deleting and re-adding it.
+    """
+    return await client.call("edit_comment", comment_id=comment_id, text=text)
+
+
+@mcp.tool
+async def delete_comment(comment_id: str) -> dict:
+    """Delete a comment outright. Prefer resolve_comment, which keeps the record."""
+    return await client.call("delete_comment", comment_id=comment_id)

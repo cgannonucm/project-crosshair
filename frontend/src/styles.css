@@ -54,9 +54,8 @@ body {
 
 .app {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 280px;
   grid-template-rows: 44px minmax(0, 1fr);
-  grid-template-areas: "top top" "main side";
+  grid-template-areas: "top" "main";
   height: 100%;
 }
 
@@ -141,6 +140,8 @@ body {
 }
 
 .panel-title {
+  flex: 1;
+  min-width: 0;
   font-size: 12px;
   font-weight: 600;
   color: var(--text-secondary);
@@ -192,63 +193,134 @@ button.ghost {
   cursor: pointer;
 }
 button.ghost:hover { color: var(--text-primary); background: var(--grid); }
-
-.comment-bar {
-  display: flex;
-  gap: 6px;
-  padding: 6px;
-  border-top: 1px solid var(--border);
-}
-.comment-bar input {
-  flex: 1;
-  min-width: 0;
-  font: inherit;
-  font-size: 12px;
-  padding: 4px 6px;
-  color: var(--text-primary);
-  background: var(--plane);
-  border: 1px solid var(--border);
-  border-radius: 4px;
+button.ghost.active {
+  color: #fff;
+  background: var(--accent);
+  border-color: transparent;
 }
 
-/* ---- sidebar ---- */
-.sidebar {
-  grid-area: side;
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  background: var(--surface);
-  border-left: 1px solid var(--border);
-  padding: 10px;
-  gap: 8px;
+/* ---- comments ----
+   Pins float over the plot and are the only thing drawn until one is opened,
+   so a dense grid of panels stays readable. */
+.comment-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;  /* the plot underneath stays interactive */
+  overflow: hidden;
 }
+.comment-layer > * { pointer-events: none; }
+.comment-pin-wrap, .comment-stack, .comment-popover { pointer-events: auto; }
 
-.sidebar h2 {
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--muted);
-  margin: 0;
+.comment-count {
+  font-size: 10px;
   font-weight: 600;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  border-radius: 999px;
+  padding: 1px 6px;
+  margin-left: auto;
 }
 
-.log { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
+/* Swallows the drag while a region is being picked, so Plotly never sees it. */
+.region-capture {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  pointer-events: auto;
+  cursor: crosshair;
+}
 
-.log-entry { font-size: 12px; line-height: 1.45; }
-.log-entry .who {
-  display: block;
+.comment-region {
+  position: absolute;
+  border: 1px dashed color-mix(in srgb, var(--accent) 55%, transparent);
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+  border-radius: 2px;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+.comment-anchor:hover .comment-region,
+.comment-region.open,
+.comment-region.draft { opacity: 1; }
+
+.comment-pin-wrap { position: absolute; }
+
+.comment-pin {
+  transform: translate(-40%, -50%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border-radius: 999px 999px 999px 2px;
+  border: 1px solid var(--surface);
+  background: var(--accent);
+  color: #fff;
+  font: inherit;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.28);
+}
+.comment-pin.human { background: var(--good); }
+.comment-pin:hover, .comment-pin.open { transform: translate(-40%, -50%) scale(1.15); }
+
+/* Comments whose anchor is off-screen (or that address the whole panel). */
+.comment-stack {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: flex;
+  gap: 4px;
+}
+.comment-stack .comment-pin-wrap { position: relative; }
+.comment-stack .comment-pin { transform: none; }
+.comment-stack .comment-pin:hover, .comment-stack .comment-pin.open { transform: scale(1.15); }
+
+.comment-popover {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 5;
+  width: 220px;
+  padding: 8px 10px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
+}
+.comment-popover.flip-x { left: auto; right: 8px; }
+.comment-popover.flip-y { top: auto; bottom: 8px; }
+.comment-popover.composer { top: 4px; left: 4px; }
+.comment-popover.composer.stacked { position: absolute; top: 8px; right: 8px; left: auto; }
+
+.comment-popover header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
   font-size: 10px;
   text-transform: uppercase;
   letter-spacing: 0.05em;
   color: var(--muted);
+  margin-bottom: 4px;
 }
-.log-entry.agent .what { color: var(--text-primary); }
-.log-entry.you .what { color: var(--text-secondary); }
+.comment-popover p {
+  margin: 0 0 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+/* Wraps rather than overflowing: a read popover carries four actions. */
+.comment-popover footer { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
 
-.note-box { display: flex; flex-direction: column; gap: 6px; }
-.note-box textarea {
+.comment-popover textarea {
+  width: 100%;
   resize: vertical;
   min-height: 56px;
+  margin-bottom: 6px;
   font: inherit;
   font-size: 12px;
   padding: 6px;
@@ -258,15 +330,32 @@ button.ghost:hover { color: var(--text-primary); background: var(--grid); }
   border-radius: 4px;
 }
 
-.note-box button,
-.comment-bar button {
+.comment-popover footer button:not(.ghost) {
   font: inherit;
-  font-size: 12px;
-  padding: 5px 10px;
+  font-size: 11px;
+  padding: 3px 10px;
   border-radius: 4px;
   border: 1px solid transparent;
   background: var(--accent);
   color: #fff;
+  cursor: pointer;
+}
+.comment-popover footer button:disabled { opacity: 0.45; cursor: default; }
+
+.toast {
+  position: fixed;
+  bottom: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 20;
+  max-width: min(560px, calc(100vw - 28px));
+  padding: 8px 14px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: #fff;
+  background: var(--critical);
+  border-radius: 6px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.28);
   cursor: pointer;
 }
 
@@ -286,11 +375,3 @@ button.ghost:hover { color: var(--text-primary); background: var(--grid); }
   border-radius: 3px;
 }
 
-@media (max-width: 860px) {
-  .app {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: 44px minmax(0, 1fr) 200px;
-    grid-template-areas: "top" "main" "side";
-  }
-  .sidebar { border-left: none; border-top: 1px solid var(--border); }
-}

@@ -136,10 +136,16 @@ async def main() -> None:
               f"browser_connected={state['browser_connected']}")
         print(f"open {state['url']}")
 
-        # 6. Snapshot — only works with a browser open.
+        # 6. Pin a comment to a region of the residual plot and wait for an answer.
         if state["browser_connected"]:
-            await call("add_note", text="Please lasso any outliers in the residual panel.")
-            print("waiting 90s for you to select points in the browser…")
+            await call(
+                "add_comment",
+                panel_id="residual",
+                text="The residual crosses zero around here — is that the point where "
+                     "run B overtakes run A? Comment back on the region you mean.",
+                x0=220, x1=300, y0=-0.05, y1=0.05,
+            )
+            print("waiting 90s for you to answer the comment in the browser…")
             fb = await call("wait_for_feedback", timeout_s=90)
             for ev in fb["events"]:
                 print(f"  [{ev['kind']}] panel={ev['panel_id']} {str(ev['data'])[:120]}")

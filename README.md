@@ -85,7 +85,10 @@ clear the plots but keep the server and browser tab alive, use `reset_workspace`
 | `snapshot` | PNG of a view or panel, returned to the agent as an image |
 | `get_events` | Drain human interactions (non-blocking) |
 | `wait_for_feedback` | Block until the human responds |
-| `add_note` | Post a note into the browser's activity log |
+| `add_comment` | Pin a comment to a region of a plot |
+| `list_comments` | Read the comment thread on a panel or view |
+| `edit_comment` | Rewrite a comment's text, keeping its pin |
+| `resolve_comment` / `delete_comment` | Close out a comment |
 
 ## Data plane
 
@@ -101,6 +104,29 @@ rewrites the ref to a `/data/{id}` handle the browser fetches directly. Optional
 keys: `query` (a pandas query string, e.g. `"epoch > 10"`) and `stride` for
 downsampling. Small data can still be inlined as a plain array.
 
+## Comments
+
+Discussion happens **on the plot**, not in a chat pane. A comment is pinned to a
+region of a panel and shows as a numbered pin; clicking it reveals the text, the
+way margin comments work in a word processor. The human drags out a region with
+the panel's **comment** button; an agent does the same thing with `add_comment`:
+
+```python
+add_comment("loss", "This spike is the LR restart — should we damp it?",
+            x0=300, x1=340, y0=0.6, y1=1.2)
+```
+
+Anchors are stored in **data coordinates**, so a pin stays on the data it refers
+to as the human zooms and pans. A pin whose region scrolls off-screen falls back
+to a stack in the panel's corner rather than disappearing. Agent pins are blue,
+the human's are green. Omit the coordinates to comment on a panel as a whole —
+that also works on markdown and image panels.
+
+There is deliberately no chat sidebar: Crosshair is meant to sit alongside a
+terminal agent harness, which is where open-ended conversation belongs. What the
+display adds is the thing a terminal cannot do — pointing at a specific place in
+the data.
+
 ## Feedback loop
 
 The browser reports back to the agent's event queue:
@@ -108,11 +134,13 @@ The browser reports back to the agent's event queue:
 - **selection** — box/lasso selection, with point indices and values
 - **zoom** — axis ranges after zoom/pan (debounced)
 - **click** — a single point
-- **comment** — free text, per panel or workspace-wide
+- **comment** — a comment the human pinned, with its text and anchor
+- **comment_resolved** — the human resolved or reopened a comment
+- **comment_edited** — the human rewrote a comment's text
 
 The agent reads these with `get_events(since_seq)` or blocks on
-`wait_for_feedback(timeout_s)` — so it can say "I've plotted the residuals, please
-lasso the outliers" and wait for the answer.
+`wait_for_feedback(timeout_s)` — so it can pin "are these the sensor dropouts?"
+on a cluster of outliers and wait for the answer.
 
 ## Demo
 
@@ -122,7 +150,8 @@ python examples/demo.py
 
 Generates two simulated training runs, builds a 2×2 view (a wide loss comparison
 over a residual scatter and a live-streaming panel), patches the y-axis to log,
-streams 100 points, and — if a browser is open — waits for you to select points.
+streams 100 points, pins a comment on a region of the residual plot, and — if a
+browser is open — waits for you to answer it.
 
 ## Development
 

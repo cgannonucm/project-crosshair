@@ -40,12 +40,52 @@ class Panel:
     title: str
     type: str  # "plotly" | "markdown" | "image"
     spec: dict
+    # Bumped on every spec change. The browser re-plots on this rather than on
+    # object identity, so unrelated state broadcasts (a new comment, another
+    # panel's edit) don't tear down a figure and lose its zoom or current frame.
+    rev: int = 1
+
+
+@dataclass
+class Anchor:
+    """A rectangle a comment is pinned to, in one of two coordinate spaces.
+
+    `space="data"` (the default) reads the corners as data coordinates, so the
+    comment tracks the data under it as the human zooms and pans. Coordinates are
+    whatever the axis speaks — numbers, but also date strings or category names —
+    and are passed through to Plotly untouched.
+
+    `space="panel"` reads them as fractions of the panel box, x rightward and y
+    downward from the top-left corner. That is for comments on the chrome rather
+    than the data — a tick label, an axis title, a legend — which should stay put
+    when the view is zoomed, and which have no data coordinates to speak of.
+    """
+
+    x0: Any
+    x1: Any
+    y0: Any
+    y1: Any
+    space: str = "data"
+
+
+@dataclass
+class Comment:
+    id: str
+    panel_id: str
+    view: str
+    author: str  # "agent" | "human"
+    text: str
+    ts: float
+    anchor: Anchor | None = None  # None = a comment on the panel as a whole
+    resolved: bool = False
+    edited_ts: float | None = None  # set when the text is revised after posting
 
 
 class Store:
     def __init__(self) -> None:
         self.views: dict[str, View] = {}
         self.panels: dict[str, Panel] = {}
+        self.comments: dict[str, Comment] = {}
         self.active_view: str | None = None
         self.url: str = ""  # set by the daemon once it knows its bound port
         self.clients: set[Any] = set()  # fastapi WebSocket connections
@@ -69,10 +109,29 @@ class Store:
                 for v in self.views.values()
             ],
             "panels": {
-                p.id: {"id": p.id, "view": p.view, "title": p.title, "type": p.type, "spec": p.spec}
+                p.id: {"id": p.id, "view": p.view, "title": p.title, "type": p.type,
+                       "spec": p.spec, "rev": p.rev}
                 for p in self.panels.values()
             },
+            "comments": [self.comment_dict(c) for c in self.sorted_comments()],
         }
+
+    def comment_dict(self, c: Comment) -> dict:
+        return {
+            "id": c.id,
+            "panel_id": c.panel_id,
+            "view": c.view,
+            "author": c.author,
+            "text": c.text,
+            "ts": c.ts,
+            "anchor": asdict(c.anchor) if c.anchor else None,
+            "resolved": c.resolved,
+            "edited_ts": c.edited_ts,
+        }
+
+    def sorted_comments(self) -> list[Comment]:
+        """Oldest first — the browser numbers pins in this order."""
+        return sorted(self.comments.values(), key=lambda c: c.ts)
 
     # ---------- websocket fan-out ----------
 
@@ -88,6 +147,17 @@ class Store:
 
     async def broadcast_state(self) -> None:
         await self.broadcast({"type": "state", "state": self.state_dict()})
+
+    async def broadcast_comments(self) -> None:
+        """Push just the comment list.
+
+        A workspace carrying inline figure data runs to many megabytes, and
+        re-sending all of it to add one pin costs seconds of latency. Comments
+        are tiny and change often, so they get their own channel.
+        """
+        await self.broadcast(
+            {"type": "comments", "comments": [self.comment_dict(c) for c in self.sorted_comments()]}
+        )
 
     # ---------- layout helpers ----------
 
@@ -112,6 +182,20 @@ class Store:
     def remove_placement(self, panel_id: str) -> None:
         for v in self.views.values():
             v.placements = [p for p in v.placements if p.panel_id != panel_id]
+
+    # ---------- comments ----------
+
+    def drop_comments(self, *, panel_id: str | None = None, view: str | None = None) -> int:
+        """Discard comments whose anchor panel or view is going away."""
+        doomed = [
+            c.id
+            for c in self.comments.values()
+            if (panel_id is not None and c.panel_id == panel_id)
+            or (view is not None and c.view == view)
+        ]
+        for cid in doomed:
+            del self.comments[cid]
+        return len(doomed)
 
     # ---------- human feedback events ----------
 

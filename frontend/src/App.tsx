@@ -3,21 +3,44 @@ import { toPng } from "html-to-image";
 import Plotly from "plotly.js-dist-min";
 import PanelFrame from "./panels/PanelFrame";
 import { plotNodes } from "./panels/PlotlyPanel";
-import { onSnapshotRequest, send, sendEvent, useWorkspace } from "./ws";
+import { onClientError, onSnapshotRequest, send, useWorkspace } from "./ws";
 import { useChrome } from "./theme";
-import type { View } from "./types";
+import type { Comment, View } from "./types";
 
 export default function App() {
-  const { state, connected, log, appendLog } = useWorkspace();
+  const { state, connected } = useWorkspace();
   const chrome = useChrome();
   const [selected, setSelected] = useState<string | null>(null);
-  const [note, setNote] = useState("");
+  const [error, setError] = useState<string | null>(null);
+
+  // A rejected action must be visible — silently dropping one is how a comment
+  // disappears with no explanation.
+  useEffect(() => {
+    let clear: number | undefined;
+    return onClientError((text) => {
+      setError(text);
+      window.clearTimeout(clear);
+      clear = window.setTimeout(() => setError(null), 8000);
+    });
+  }, []);
 
   const viewName = selected ?? state.active_view ?? state.views[0]?.name ?? null;
   const view: View | undefined = useMemo(
     () => state.views.find((v) => v.name === viewName),
     [state.views, viewName]
   );
+
+  // Open comments, bucketed by the panel they are pinned to.
+  const commentsByPanel = useMemo(() => {
+    const byPanel = new Map<string, Comment[]>();
+    for (const c of state.comments ?? []) {
+      if (c.resolved) continue;
+      const list = byPanel.get(c.panel_id);
+      if (list) list.push(c);
+      else byPanel.set(c.panel_id, [c]);
+    }
+    return byPanel;
+  }, [state.comments]);
 
   // Answer snapshot requests so the agent can see exactly what the human sees.
   useEffect(
@@ -57,14 +80,6 @@ export default function App() {
   const selectView = (name: string) => {
     setSelected(name);
     send({ type: "set_active_view", view: name });
-  };
-
-  const submitNote = () => {
-    const text = note.trim();
-    if (!text) return;
-    sendEvent("comment", { text }, undefined, viewName);
-    appendLog("you", text);
-    setNote("");
   };
 
   const placements = view?.placements ?? [];
@@ -112,7 +127,10 @@ export default function App() {
                     gridColumn: `${p.col} / span ${p.col_span}`,
                   }}
                 >
-                  <PanelFrame panel={panel} />
+                  <PanelFrame
+                    panel={panel}
+                    comments={commentsByPanel.get(p.panel_id) ?? []}
+                  />
                 </div>
               );
             })}
@@ -127,29 +145,11 @@ export default function App() {
         )}
       </main>
 
-      <aside className="sidebar">
-        <h2>Activity</h2>
-        <div className="log">
-          {log.length === 0 && <p className="hint">Notes from the agent appear here.</p>}
-          {log.map((e) => (
-            <div key={e.id} className={`log-entry ${e.from}`}>
-              <span className="who">{e.from === "agent" ? "agent" : "you"}</span>
-              <span className="what">{e.text}</span>
-            </div>
-          ))}
+      {error && (
+        <div className="toast" role="alert" onClick={() => setError(null)}>
+          {error}
         </div>
-        <div className="note-box">
-          <textarea
-            value={note}
-            placeholder="Note to agent — it can read this with get_events…"
-            onChange={(e) => setNote(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) submitNote();
-            }}
-          />
-          <button onClick={submitNote}>Send</button>
-        </div>
-      </aside>
+      )}
     </div>
   );
 }

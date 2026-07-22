@@ -8,6 +8,23 @@ import { mergeDefaults, plotlyLayoutDefaults, useChrome } from "../theme";
 /** Registry so the snapshot handler can render any live plot to PNG. */
 export const plotNodes = new Map<string, HTMLDivElement>();
 
+/** Fires whenever a plot's axes move, so anchored overlays can re-project. */
+const layoutListeners = new Map<string, Set<() => void>>();
+
+export function onPlotLayout(panelId: string, fn: () => void): () => void {
+  let set = layoutListeners.get(panelId);
+  if (!set) layoutListeners.set(panelId, (set = new Set()));
+  set.add(fn);
+  return () => {
+    set!.delete(fn);
+    if (set!.size === 0) layoutListeners.delete(panelId);
+  };
+}
+
+function emitLayout(panelId: string) {
+  layoutListeners.get(panelId)?.forEach((fn) => fn());
+}
+
 const ZOOM_DEBOUNCE_MS = 400;
 
 export default function PlotlyPanel({ panel }: { panel: Panel }) {
@@ -19,6 +36,7 @@ export default function PlotlyPanel({ panel }: { panel: Panel }) {
     const node = ref.current;
     if (!node) return;
     let disposed = false;
+    let cleanupResize: (() => void) | undefined;
 
     (async () => {
       const spec = await hydrate(panel.spec);
@@ -50,7 +68,9 @@ export default function PlotlyPanel({ panel }: { panel: Panel }) {
       plot.removeAllListeners?.("plotly_click");
 
       plot.on("plotly_selected", (ev: any) => {
-        if (!ev?.points) return;
+        // Plotly also fires this when a selection is cleared; an empty point
+        // set is never feedback worth waking the agent for.
+        if (!ev?.points?.length) return;
         sendEvent(
           "selection",
           {
@@ -76,7 +96,17 @@ export default function PlotlyPanel({ panel }: { panel: Panel }) {
         );
       });
 
+      // Anchored comments are positioned from the axes, so they must re-project
+      // on every replot, zoom, pan, and resize.
+      plot.removeAllListeners?.("plotly_afterplot");
+      plot.on("plotly_afterplot", () => emitLayout(panel.id));
+      const resize = new ResizeObserver(() => emitLayout(panel.id));
+      resize.observe(node);
+      cleanupResize = () => resize.disconnect();
+      emitLayout(panel.id);
+
       plot.on("plotly_relayout", (ev: any) => {
+        emitLayout(panel.id);
         const keys = Object.keys(ev ?? {});
         if (!keys.some((k) => k.includes("axis.range") || k.includes("autorange"))) return;
         window.clearTimeout(zoomTimer.current);
@@ -89,10 +119,15 @@ export default function PlotlyPanel({ panel }: { panel: Panel }) {
     return () => {
       disposed = true;
       window.clearTimeout(zoomTimer.current);
+      cleanupResize?.();
       plotNodes.delete(panel.id);
       if (node) Plotly.purge(node);
     };
-  }, [panel.id, panel.spec, panel.view, chrome]);
+    // Keyed on `rev`, not on `spec` identity: every state broadcast delivers a
+    // fresh spec object, and re-plotting on that would reset zoom and animation
+    // frames whenever anything else in the workspace changed.
+    // (falling back to spec identity if the server predates `rev`)
+  }, [panel.id, panel.rev ?? panel.spec, panel.view, chrome]);
 
   // Streaming appends bypass a full re-render so long-running plots stay smooth.
   useEffect(
